@@ -36,15 +36,6 @@ resolution before any public disclosure. If you'd like credit for your
 finding, let us know how you'd like to be named; we're also happy to keep
 your report confidential if you prefer.
 
-<!--
-  Deliberately no fixed "triage within X hours" commitment here: it
-  would collide with two other, independent deadlines defined in the
-  CRA roadmap — the internal 4h response time of the Vulnerability
-  Coordinator (Phase 0, No. 2) and the statutory 24h/72h/14-day
-  notification deadline to ENISA for actively exploited vulnerabilities
-  (Art. 14 CRA, Phase 0, No. 5).
--->
-
 ## Safe Harbor
 
 We consider security research conducted in good faith, in accordance
