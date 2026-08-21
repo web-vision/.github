@@ -65,7 +65,7 @@ product's own documentation).
 ## Support Period
 
 Unless a product's own documentation states otherwise, our target
-support period is at least 5 years from initial release. The specific
+support period is at least 3 years from initial release. The specific
 end-of-support date for a given product is communicated in that
 product's listing/description and, where applicable, its own
 `SECURITY.md`.
