@@ -153,6 +153,18 @@ jobs:
             echo "| document | components | DT project version |"
             echo "|---|---:|---|"
           } >> "$GITHUB_STEP_SUMMARY"
+          # isLatest is single-valued per project NAME, and promoting a version clears the flag on
+          # the previous holder. An extension that emits one document per supported TYPO3 core
+          # produces concurrent variants, not successive ones, so promoting them in turn would just
+          # demote each other on every run. Only promote when this repository yields exactly one
+          # document.
+          DOCS="$(grep -c . sbom-manifest.tsv)"
+          LATEST='--latest'
+          if [ "$DOCS" -gt 1 ]; then
+            LATEST=''
+            echo "::notice::$DOCS documents produced (one per supported core); isLatest not set - "\
+                 "there is no single latest among concurrent core variants."
+          fi
           while IFS=$'\t' read -r bom variant; do
             PV="$PVER"; [ "$variant" != "default" ] && PV="${PVER}+${variant}"
             # sbom-upload.sh refuses a BOM with zero components or any version-less PURL, in
@@ -160,7 +172,7 @@ jobs:
             .sbom-tools/scripts/sbom-upload.sh --bom "$bom" \
               --project-name "$NAME" --project-version "$PV" \
               --tags "host:github.com,org:${GITHUB_REPOSITORY_OWNER}" \
-              --archive-dir bom-archive --latest $DRY
+              --archive-dir bom-archive $LATEST $DRY
             printf '| `%s` | %s | `%s` |\n' "$(basename "$bom")" \
               "$(jq '.components|length' "$bom")" "$PV" >> "$GITHUB_STEP_SUMMARY"
           done < sbom-manifest.tsv
