@@ -1,0 +1,135 @@
+# .github/workflows/sbom-reusable.yml — reusable SBOM workflow.
+#
+# Home: a PUBLIC `<org>/.github` repository (neither web-vision/.github nor fgtclb/.github exists
+# today; both must be created). Public is required because 81 of 99 repos are public and both orgs
+# are on the GitHub Free plan, where org secrets serve public repos only and a private `.github`
+# repo would need its Actions access level raised to `organization`.
+#
+# IMPORTANT: prefer the central orchestrator for coverage. This workflow exists for repositories
+# that genuinely need per-tag freshness — typically the ones that publish to TER or Packagist.
+# It must NOT be added to:
+#   * the 12 fgtclb monorepo split repos (the monorepo owns their workflow files and overwrites them)
+#   * forks (23) — GitHub disables scheduled workflows in forks by default
+#   * repos dormant >60 days — GitHub auto-disables their scheduled workflows silently
+name: SBOM (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      dtrack_url:      { required: true,  type: string }
+      project_name:    { required: false, type: string, default: "" }
+      sbom_class:      { required: false, type: string, default: "" }
+      core_versions:   { required: false, type: string, default: "" }
+      php_version:     { required: false, type: string, default: "8.3" }
+      # First run against any repository should be dry_run: true — it generates and validates the
+      # BOMs and prints a summary, but does not contact Dependency-Track.
+      dry_run:         { required: false, type: boolean, default: false }
+      sbom_tools_ref:  { required: false, type: string, default: "main" }
+    secrets:
+      DTRACK_API_KEY:  { required: true }
+      COMPOSER_AUTH:   { required: false }
+
+permissions:
+  contents: read          # default GITHUB_TOKEN is read-write in both orgs; narrow it explicitly.
+
+jobs:
+  sbom:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v6
+
+      - name: "Setup PHP"
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ inputs.php_version }}
+          tools: composer:v2
+          coverage: none
+
+      - name: "Fetch SBOM scripts"
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository_owner }}/.github
+          path: .sbom-tools
+          ref: ${{ inputs.sbom_tools_ref }}
+
+      - name: "Generate SBOM"
+        id: gen
+        env:
+          COMPOSER_AUTH: ${{ secrets.COMPOSER_AUTH }}
+          COMPOSER_HOME: /tmp/composer-sbom
+        run: |
+          set -euo pipefail
+          chmod +x .sbom-tools/scripts/*.sh
+          NAME='${{ inputs.project_name }}'
+          [ -n "$NAME" ] || NAME="$(jq -r '.name // empty' composer.json 2>/dev/null || true)"
+          [ -n "$NAME" ] || NAME="github.com/${GITHUB_REPOSITORY}"
+          CLASS='${{ inputs.sbom_class }}'
+          if [ -z "$CLASS" ]; then
+            if [ -f composer.lock ]; then
+              CLASS=composer-lock
+            elif ls core-*/composer.lock >/dev/null 2>&1; then
+              CLASS=composer-corelocks
+            else
+              # A lockless extension supporting more than one TYPO3 core major needs one BOM per
+              # core; a single resolve would silently pick one branch of "^12.4 || ^13.4".
+              MAJORS="$(.sbom-tools/scripts/derive-core-versions.sh composer.json | tr '\n' ' ')"
+              if [ "$(printf '%s' "$MAJORS" | wc -w)" -gt 1 ]; then
+                CLASS=composer-resolve-matrix
+              else
+                CLASS=composer-resolve
+              fi
+              echo "detected TYPO3 core majors: ${MAJORS:-none}"
+            fi
+          fi
+          echo "name=$NAME"   >> "$GITHUB_OUTPUT"
+          echo "class=$CLASS" >> "$GITHUB_OUTPUT"
+          .sbom-tools/scripts/sbom-generate.sh \
+            --dir . --class "$CLASS" --name "$NAME" \
+            --version "${GITHUB_REF_NAME#v}" \
+            ${{ inputs.core_versions && format('--core-versions "{0}"', inputs.core_versions) || '' }} \
+            --out sbom-output > sbom-manifest.tsv
+          cat sbom-manifest.tsv
+
+      - name: "Validate and upload SBOMs"
+        env:
+          DTRACK_API_URL: ${{ inputs.dtrack_url }}
+          DTRACK_API_KEY: ${{ secrets.DTRACK_API_KEY }}
+        run: |
+          set -euo pipefail
+          NAME='${{ steps.gen.outputs.name }}'
+          DRY=''
+          [ '${{ inputs.dry_run }}' = 'true' ] && DRY='--dry-run'
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then PVER="$GITHUB_REF_NAME"
+          else PVER="$(git rev-parse --abbrev-ref HEAD)"; fi
+          {
+            echo "### SBOM"
+            echo
+            echo "| document | components | DT project version |"
+            echo "|---|---:|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          while IFS=$'\t' read -r bom variant; do
+            PV="$PVER"; [ "$variant" != "default" ] && PV="${PVER}+${variant}"
+            # sbom-upload.sh refuses a BOM with zero components or any version-less PURL, in
+            # dry-run too — so a dry run is a real validation, not just a no-op.
+            .sbom-tools/scripts/sbom-upload.sh --bom "$bom" \
+              --project-name "$NAME" --project-version "$PV" \
+              --tags "host:github.com,org:${GITHUB_REPOSITORY_OWNER}" \
+              --archive-dir bom-archive --latest $DRY
+            printf '| `%s` | %s | `%s` |\n' "$(basename "$bom")" \
+              "$(jq '.components|length' "$bom")" "$PV" >> "$GITHUB_STEP_SUMMARY"
+          done < sbom-manifest.tsv
+          if [ -n "$DRY" ]; then
+            echo >> "$GITHUB_STEP_SUMMARY"
+            echo "_Dry run — nothing was uploaded to Dependency-Track._" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: "Store BOMs"
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sbom
+          path: |
+            sbom-output/
+            bom-archive/
+          retention-days: 90
