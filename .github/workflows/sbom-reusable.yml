@@ -16,7 +16,11 @@ name: SBOM (reusable)
 on:
   workflow_call:
     inputs:
-      dtrack_url:      { required: true,  type: string }
+      # Supply the Dependency-Track base URL EITHER as this input (plain, visible in logs) OR as
+      # the DTRACK_API_URL secret below. The secret wins if both are set. `required: false` because
+      # an input cannot default to a secret, and an empty string counts as "provided" — which is
+      # exactly how a missing value used to slip through to the upload step.
+      dtrack_url:      { required: false, type: string, default: "" }
       project_name:    { required: false, type: string, default: "" }
       sbom_class:      { required: false, type: string, default: "" }
       core_versions:   { required: false, type: string, default: "" }
@@ -27,6 +31,7 @@ on:
       sbom_tools_ref:  { required: false, type: string, default: "main" }
     secrets:
       DTRACK_API_KEY:  { required: true }
+      DTRACK_API_URL:  { required: false }
       COMPOSER_AUTH:   { required: false }
 
 permissions:
@@ -36,6 +41,46 @@ jobs:
   sbom:
     runs-on: ubuntu-24.04
     steps:
+      - name: "Check Dependency-Track configuration"
+        # Fail before generating anything. Without this the job resolves dependencies, builds every
+        # BOM and only then dies on the first upload, which buries the real cause under a wall of
+        # composer output.
+        env:
+          DTRACK_API_URL: ${{ secrets.DTRACK_API_URL || inputs.dtrack_url }}
+          DTRACK_API_KEY: ${{ secrets.DTRACK_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            # Dry run never contacts Dependency-Track (sbom-upload.sh returns before it reads the
+            # credentials), so neither value is required. This is the mode to use when the instance
+            # is unreachable from GitHub-hosted runners but the BOMs should still be validated.
+            echo "Dry run: Dependency-Track configuration not required."
+            exit 0
+          fi
+          if [ -z "${DTRACK_API_URL:-}" ]; then
+            echo "::error::DTRACK_API_URL is empty. Pass it either as the 'dtrack_url' input or as"
+            echo "::error::the 'DTRACK_API_URL' secret. Note that an org *variable* (vars.*) and an"
+            echo "::error::org *secret* (secrets.*) are different namespaces - this organisation"
+            echo "::error::holds DTRACK_API_URL as a secret, so the caller must pass it under"
+            echo "::error::secrets:, not with:."
+            exit 1
+          fi
+          [ -n "${DTRACK_API_KEY:-}" ] || { echo "::error::DTRACK_API_KEY is empty."; exit 1; }
+          # curl writes %{http_code} even when it fails, emitting 000 - so take its output as-is
+          # rather than appending a fallback, which would produce "000000" and defeat the test.
+          code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
+                   "${DTRACK_API_URL%/}/api/version" 2>/dev/null || true)"
+          case "${code:-000}" in
+            000|"")
+              echo "::error::Cannot reach ${DTRACK_API_URL%/} from a GitHub-hosted runner."
+              echo "::error::If Dependency-Track is internal-only, do not expose it - let the"
+              echo "::error::central orchestrator upload these repositories instead, or run this"
+              echo "::error::workflow with dry_run: true to generate and validate BOMs only."
+              exit 1
+              ;;
+          esac
+          echo "Dependency-Track responded with HTTP $code"
+
       - name: "Checkout"
         uses: actions/checkout@v6
 
@@ -93,7 +138,7 @@ jobs:
 
       - name: "Validate and upload SBOMs"
         env:
-          DTRACK_API_URL: ${{ inputs.dtrack_url }}
+          DTRACK_API_URL: ${{ secrets.DTRACK_API_URL || inputs.dtrack_url }}
           DTRACK_API_KEY: ${{ secrets.DTRACK_API_KEY }}
         run: |
           set -euo pipefail
