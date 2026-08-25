@@ -12,7 +12,18 @@
 set -euo pipefail
 FILE="${1:?usage: derive-core-versions.sh <composer.json> [package]}"
 PKG="${2:-typo3/cms-core}"
-jq -r --arg p "$PKG" '(.require[$p] // .["require-dev"][$p] // "")' "$FILE" \
+# Fall back to any other typo3/cms-* requirement when typo3/cms-core is absent. Extensions commonly
+# declare only the subsystems they use - fgtclb/newspage requires cms-extbase, cms-fluid and
+# cms-frontend but never cms-core - and reading only cms-core yields no majors for those, so a
+# multi-core extension would be resolved once and silently described against one core.
+jq -r --arg p "$PKG" '
+  (.require[$p] // .["require-dev"][$p] // "") as $direct
+  | if $direct != "" then $direct
+    else [ (.require // {}) + (.["require-dev"] // {})
+           | to_entries[]
+           | select(.key | startswith("typo3/cms-"))
+           | .value ] | join(" || ")
+    end' "$FILE" \
   | tr '|,' '\n\n' \
   | grep -oE '[0-9]+\.[0-9]+' \
   | cut -d. -f1 \

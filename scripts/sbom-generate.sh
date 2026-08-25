@@ -55,6 +55,15 @@ prepare_resolve() {
     # candidates, and resolves to 80 packages with this set - composer then reporting 27 advisories
     # affecting 6 packages, which is the finding we want recorded rather than suppressed.
     composer config policy.advisories.block false 2>/dev/null || true
+
+    # Drop require-dev before resolving. The BOM is emitted with --omit=dev, so development
+    # dependencies never reach the output - resolving them can only fail the run. And it does:
+    # typo3/minimal pulls in typo3/cms-install, which requires nikic/php-parser ^4, while a modern
+    # require-dev commonly pins ^5. web-vision/typo3-enable-translated-content fails on exactly that
+    # conflict and resolves cleanly once require-dev is out of the way.
+    if [ -f composer.json ] && jq -e 'has("require-dev")' composer.json >/dev/null 2>&1; then
+      jq 'del(."require-dev")' composer.json > composer.json.sbom && mv composer.json.sbom composer.json
+    fi
   ) >&2
 }
 
