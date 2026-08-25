@@ -79,9 +79,18 @@ case "$CLASS" in
     make_bom "$DIR" "$OUTFILE" "$VERSION"
     if [ "$CLASS" = "composer-lock+magento-appcode" ]; then
       # Magento 2 shops copy-install modules into app/code that never appear in composer.lock.
-      # Merge them in as first-class components, or the SBOM understates third-party code.
-      log "harvesting app/code modules not present in composer.lock"
-      php "$(dirname "$0")/magento-appcode-merge.php" "$DIR" "$OUTFILE"
+      # Merge them in as first-class components, or the SBOM understates third-party code -
+      # measured at 7-12 vendors per shop, which is exactly the commercial code the CRA targets.
+      helper="$(dirname "$0")/magento-appcode-merge.php"
+      if [ -f "$helper" ]; then
+        log "harvesting app/code modules not present in composer.lock"
+        php "$helper" "$DIR" "$OUTFILE"
+      else
+        # Degrade loudly rather than dying: the lock-based BOM is still valid and useful, it just
+        # under-reports app/code. Silence here would let an incomplete SBOM look complete.
+        log "WARNING: $(basename "$helper") not implemented - emitting the lock-only BOM."
+        log "WARNING: copy-installed app/code modules (7-12 vendors per shop) are NOT included."
+      fi
     fi
     emit "$OUTFILE" "default"
     ;;
@@ -155,7 +164,9 @@ case "$CLASS" in
     # Production docroot with a committed vendor/ but no composer.json/lock
     # (e.g. WHMCS). Neither syft nor trivy catalogues vendor/composer/installed.php.
     OUTFILE="$OUT/${SLUG}.cdx.json"
-    php "$(dirname "$0")/installed-php-to-bom.php" "$DIR" "$NAME" "$VERSION" > "$OUTFILE"
+    helper="$(dirname "$0")/installed-php-to-bom.php"
+    [ -f "$helper" ] || { log "ERROR: $(basename "$helper") is not implemented; class vendor-installed-php cannot be generated"; exit 3; }
+    php "$helper" "$DIR" "$NAME" "$VERSION" > "$OUTFILE"
     emit "$OUTFILE" "default"
     ;;
 

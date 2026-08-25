@@ -27,7 +27,11 @@ def sbom_class:
 # ---------------------------------------------------------------- exclusion rules
 # R0 wins over everything; otherwise first match wins.
 def exclude_reason:
-  if ((.topics // []) | index("sbom-required")) then null                      # R0 opt-in override
+  # Topic vocabulary (one word, one meaning):
+  #   sbom               opt in. Gathered by the central sweep AND overrides every exclusion below.
+  #   no-sbom            opt out. Never scanned, never expected in the coverage report.
+  #   sbom-own-pipeline  carries its own sbom-job.yml; skipped by the sweep, still audited.
+  if ((.topics // []) | index("sbom")) then null                              # R0 opt-in override
   elif ((.topics // []) | index("no-sbom")) then "R5 opt-out topic"
   elif (.archived // false) then "R1 archived"
   elif (.default_branch // "") == "" then "R2 empty default branch"

@@ -4,6 +4,25 @@
 #   sbom-inventory.sh --host git.example.com --token <PAT> --out inventory.jsonl
 #   sbom-inventory.sh --host github.com --org web-vision --out inventory.jsonl
 #
+#   --membership           ONLY projects the token's user is a member of. Off by default.
+#                          Leaving it off is deliberate: `membership=true` silently hides every
+#                          project the user does not belong to. Measured on git.web-vision.io it
+#                          returned 307 of 393 non-archived projects - 86 repositories, 22 %, absent
+#                          from the inventory with no error and no warning. With an admin token the
+#                          unfiltered query returns the whole instance.
+#   --with-archived        include archived projects (default: exclude).
+#
+#   --topic <t>[,<t>...]   restrict the gather to repositories carrying these topics.
+#                          Filtered server-side (GitLab `?topic=`, GitHub `--topic`), so it is far
+#                          cheaper than enumerating everything, and it makes onboarding opt-in: tag
+#                          a repository and it joins the next run.
+#                          Multiple topics are ANDed. **Matching is case-sensitive on GitLab** —
+#                          `topic=extension` returns nothing where `topic=Extension` returns 14.
+#
+# IMPORTANT: a topic-filtered gather is a SCAN scope, not an AUDIT scope. An untagged repository is
+# then silently uncovered, which is precisely the gap a CRA coverage report has to surface. Run the
+# audit against an UNFILTERED inventory (see sbom-central.yml, which produces both).
+#
 # Emits one JSON object per repository with the fields consumed by sbom-classify.jq.
 # Uses only read APIs. Never clones.
 #
@@ -12,10 +31,16 @@
 # The real last-commit date is fetched per project instead.
 set -euo pipefail
 HOST=""; TOKEN="${SBOM_READ_TOKEN:-}"; ORG=""; OUT="inventory.jsonl"; JOBS="${SBOM_JOBS:-8}"
+TOPIC="${SBOM_TOPIC:-}"
+MEMBERSHIP=0
+ARCHIVED=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --host) HOST="$2"; shift 2;; --token) TOKEN="$2"; shift 2;;
     --org) ORG="$2"; shift 2;;   --out) OUT="$2"; shift 2;;
+    --topic) TOPIC="$2"; shift 2;;
+    --membership) MEMBERSHIP=1; shift;;
+    --with-archived) ARCHIVED=1; shift;;
     --jobs) JOBS="$2"; shift 2;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
@@ -26,7 +51,14 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
 if [ "$HOST" = "github.com" ]; then
   [ -n "$ORG" ] || { echo "--org required for github.com" >&2; exit 2; }
-  gh repo list "$ORG" --limit 1000 --json \
+  GH_TOPIC_ARGS=()
+  if [ -n "$TOPIC" ]; then
+    # gh accepts one --topic per flag; repeating them ANDs.
+    IFS=',' read -ra _tl <<< "$TOPIC"
+    for _t in "${_tl[@]}"; do GH_TOPIC_ARGS+=(--topic "$_t"); done
+    echo "[inventory] restricting to topics: $TOPIC" >&2
+  fi
+  gh repo list "$ORG" --limit 1000 "${GH_TOPIC_ARGS[@]}" --json \
     name,nameWithOwner,isArchived,isPrivate,isFork,defaultBranchRef,pushedAt,repositoryTopics,url \
     | jq -c '.[]' > "$TMP/raw.jsonl"
   probe_github() {
@@ -66,7 +98,11 @@ else
   export -f api; export HOST TOKEN
   page=1; : > "$TMP/projects.jsonl"
   while :; do
-    res="$(api "projects?membership=true&per_page=100&page=${page}&order_by=id&sort=asc&archived=false")"
+    q="per_page=100&page=${page}&order_by=id&sort=asc"
+    [ "$MEMBERSHIP" = 1 ] && q="${q}&membership=true"
+    [ "$ARCHIVED" = 0 ] && q="${q}&archived=false"
+    [ -n "$TOPIC" ] && q="${q}&topic=${TOPIC}"
+    res="$(api "projects?${q}")"
     n="$(jq 'length' <<<"$res")"; [ "$n" = "0" ] && break
     jq -c '.[]' <<<"$res" >> "$TMP/projects.jsonl"; page=$((page+1)); [ "$page" -gt 50 ] && break
   done
@@ -103,4 +139,8 @@ else
        now_minus_6m:$m6, now_minus_24m:$m24}' >> "$OUT"
   done < "$TMP/projects.jsonl"
 fi
-echo "[inventory] wrote $(wc -l < "$OUT") repositories to $OUT" >&2
+echo "[inventory] wrote $(wc -l < "$OUT") repositories to $OUT${TOPIC:+ (topics: $TOPIC)}" >&2
+if [ -n "$TOPIC" ] && [ ! -s "$OUT" ]; then
+  echo "[inventory] WARNING: topic filter '$TOPIC' matched nothing. GitLab topic matching is" >&2
+  echo "[inventory] case-sensitive; check the exact spelling in the project settings." >&2
+fi

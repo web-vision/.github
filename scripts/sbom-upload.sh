@@ -88,27 +88,49 @@ set -- --fail-with-body --silent --show-error \
 RESP="$(curl "$@")" || die "upload failed: $RESP"
 log "uploaded: $RESP"
 
-# ---- promote to latest (existing projects) -------------------------------------
-# BOM upload ignores isLatest for a project that already exists, so promote explicitly.
-# NOTE: Project.isLatest is a primitive boolean and PATCH only skips nulls — an omitted isLatest
+# ---- promote to latest (optional) ----------------------------------------------
+# BOM upload honours isLatest only when it CREATES the project, so an existing project has to be
+# promoted explicitly with PATCH.
+#
+# Two things make this optional rather than routine:
+#
+#  1. isLatest is single-valued per project NAME — "at most one version per project name carries
+#     the flag, and marking a new version as latest clears it on the previous one". For an extension
+#     that emits one document per supported TYPO3 core, the variants are concurrent, not successive:
+#     promoting main+typo3-13 and then main+typo3-14 would just demote the first, every run. There
+#     is no meaningful "latest" among parallel core variants, so callers must not promote them.
+#  2. PATCH /api/v1/project/{uuid} needs PORTFOLIO_MANAGEMENT_UPDATE. A least-privilege CI key
+#     carrying only BOM_UPLOAD + PROJECT_CREATION_UPLOAD cannot do it, and should not: that
+#     permission also allows deactivating and modifying any project. A 403 here is the expected
+#     result of a correctly scoped CI key, not a fault.
+#
+# NOTE: Project.isLatest is a primitive boolean and PATCH skips only nulls — an omitted isLatest
 # deserialises to false and WOULD DEMOTE the project. Always send it explicitly.
 if [ "$LATEST" = 1 ]; then
   UUID="$(printf '%s' "$RESP" | jq -r '.projectUuid // empty')"
-  if [ -z "$UUID" ]; then   # Dependency-Track 4.x does not return projectUuid
+  if [ -z "$UUID" ]; then   # Dependency-Track 4.x does not return projectUuid on upload
     UUID="$(curl --fail-with-body -sS -G "${DTRACK_API_URL%/}/api/v1/project/lookup" \
               --header "X-Api-Key: ${DTRACK_API_KEY}" \
               --data-urlencode "name=${PNAME}" --data-urlencode "version=${PVERSION}" \
-            | jq -r '.uuid // empty')"
+              2>/dev/null | jq -r '.uuid // empty')"
   fi
   if [ -n "$UUID" ]; then
-    curl --fail-with-body -sS -o /dev/null \
-      --request PATCH "${DTRACK_API_URL%/}/api/v1/project/${UUID}" \
-      --header "X-Api-Key: ${DTRACK_API_KEY}" \
-      --header 'Content-Type: application/json' \
-      --data '{"isLatest": true}' \
-      && log "promoted ${PNAME}:${PVERSION} to latest" \
-      || log "WARNING: could not promote to latest (needs PORTFOLIO_MANAGEMENT_UPDATE)"
+    # Capture the status rather than letting curl print its own error: a 403 is an expected outcome
+    # and should not look like a failure in the log.
+    code="$(curl -sS -o /dev/null -w '%{http_code}' \
+              --request PATCH "${DTRACK_API_URL%/}/api/v1/project/${UUID}" \
+              --header "X-Api-Key: ${DTRACK_API_KEY}" \
+              --header 'Content-Type: application/json' \
+              --data '{"isLatest": true}' 2>/dev/null || true)"
+    case "${code:-000}" in
+      2*)  log "promoted ${PNAME}:${PVERSION} to latest" ;;
+      403) log "not promoted to latest: this API key lacks PORTFOLIO_MANAGEMENT_UPDATE." \
+               "That is expected for a least-privilege CI key — promotion is the reconciler's job." ;;
+      404) log "not promoted to latest: project ${PNAME}:${PVERSION} not found (HTTP 404)" ;;
+      000) log "not promoted to latest: Dependency-Track unreachable" ;;
+      *)   log "not promoted to latest: unexpected HTTP ${code}" ;;
+    esac
   else
-    log "WARNING: could not resolve project uuid; skipped latest promotion"
+    log "not promoted to latest: could not resolve project uuid"
   fi
 fi

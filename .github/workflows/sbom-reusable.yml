@@ -29,6 +29,14 @@ on:
       # BOMs and prints a summary, but does not contact Dependency-Track.
       dry_run:         { required: false, type: boolean, default: false }
       sbom_tools_ref:  { required: false, type: string, default: "main" }
+      # Regenerate the SBOM for an arbitrary ref - typically an already-published release tag, when
+      # an incident makes it necessary to know what that release resolves to TODAY. Empty means the
+      # ref the workflow was triggered on.
+      #
+      # This is an input rather than dispatching the workflow itself at the tag, because
+      # `gh workflow run … --ref v1.2.3` requires the workflow FILE to exist on that tag, which is
+      # false for every release published before the workflow was added.
+      target_ref:      { required: false, type: string, default: "" }
     secrets:
       DTRACK_API_KEY:  { required: true }
       DTRACK_API_URL:  { required: false }
@@ -83,6 +91,9 @@ jobs:
 
       - name: "Checkout"
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.target_ref || github.ref }}
+          fetch-depth: 0
 
       - name: "Setup PHP"
         uses: shivammathur/setup-php@v2
@@ -105,6 +116,7 @@ jobs:
           COMPOSER_HOME: /tmp/composer-sbom
         run: |
           set -euo pipefail
+          TARGET_REF='${{ inputs.target_ref }}'
           chmod +x .sbom-tools/scripts/*.sh
           NAME='${{ inputs.project_name }}'
           [ -n "$NAME" ] || NAME="$(jq -r '.name // empty' composer.json 2>/dev/null || true)"
@@ -127,11 +139,14 @@ jobs:
               echo "detected TYPO3 core majors: ${MAJORS:-none}"
             fi
           fi
+          # Component version for the BOM metadata: the target ref if one was given, else the ref
+          # the run was triggered on, with a leading v stripped.
+          COMPONENT_VERSION="${TARGET_REF:-$GITHUB_REF_NAME}"; COMPONENT_VERSION="${COMPONENT_VERSION#v}"
           echo "name=$NAME"   >> "$GITHUB_OUTPUT"
           echo "class=$CLASS" >> "$GITHUB_OUTPUT"
           .sbom-tools/scripts/sbom-generate.sh \
             --dir . --class "$CLASS" --name "$NAME" \
-            --version "${GITHUB_REF_NAME#v}" \
+            --version "$COMPONENT_VERSION" \
             ${{ inputs.core_versions && format('--core-versions "{0}"', inputs.core_versions) || '' }} \
             --out sbom-output > sbom-manifest.tsv
           cat sbom-manifest.tsv
@@ -145,8 +160,16 @@ jobs:
           NAME='${{ steps.gen.outputs.name }}'
           DRY=''
           [ '${{ inputs.dry_run }}' = 'true' ] && DRY='--dry-run'
-          if [ "$GITHUB_REF_TYPE" = "tag" ]; then PVER="$GITHUB_REF_NAME"
-          else PVER="$(git rev-parse --abbrev-ref HEAD)"; fi
+          TARGET='${{ inputs.target_ref }}'
+          if [ -n "$TARGET" ]; then
+            # An explicit target wins, and is reported verbatim: a rescan of v1.2.3 must land in the
+            # v1.2.3 project version, not in the default branch's.
+            PVER="$TARGET"
+          elif [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            PVER="$GITHUB_REF_NAME"
+          else
+            PVER="$(git rev-parse --abbrev-ref HEAD)"
+          fi
           {
             echo "### SBOM"
             echo
