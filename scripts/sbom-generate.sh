@@ -41,6 +41,23 @@ SLUG="$(printf '%s' "$NAME" | tr '/' '-' | tr -cd 'A-Za-z0-9._-')"
 
 log() { printf '[sbom] %s\n' "$*" >&2; }
 
+
+# prepare_resolve <dir> — settings shared by every resolving class.
+prepare_resolve() {
+  ( cd "$1"
+    composer config lock true
+    # Composer refuses to resolve a version affected by a security advisory. For an SBOM that is
+    # backwards: the whole point is to record what an extension actually installs, INCLUDING the
+    # vulnerable versions, so Dependency-Track can flag them. Blocking resolution makes the tool
+    # blind exactly where it matters - an extension targeting an end-of-life core cannot be
+    # inventoried at all, which is the case most worth knowing about.
+    # Measured: fgtclb/content-notes (TYPO3 ^11.5) fails outright with 44 advisory-blocked
+    # candidates, and resolves to 80 packages with this set - composer then reporting 27 advisories
+    # affecting 6 packages, which is the finding we want recorded rather than suppressed.
+    composer config policy.advisories.block false 2>/dev/null || true
+  ) >&2
+}
+
 ensure_plugin() {
   [ -x "$COMPOSER_HOME/vendor/bin/.nothing" ] 2>/dev/null || true
   if ! composer global show cyclonedx/cyclonedx-php-composer >/dev/null 2>&1; then
@@ -134,8 +151,8 @@ case "$CLASS" in
     for major in $CORE_VERSIONS; do
       major="${major%%.*}"                      # tolerate "13.4" being passed in explicitly
       work="$(mktemp -d)"; cp -a "$DIR/." "$work/"
+      prepare_resolve "$work"
       ( cd "$work"
-        composer config lock true
         composer require --dev "typo3/minimal:^${major}" --no-update --no-interaction
         # -W lets transitive deps move; --no-install keeps it fast and vendor-free.
         # composer:2 images lack ext-intl, so platform reqs must be ignored.
@@ -151,8 +168,8 @@ case "$CLASS" in
     # Single-target package with no lock: one resolve.
     ensure_plugin
     work="$(mktemp -d)"; cp -a "$DIR/." "$work/"
+    prepare_resolve "$work"
     ( cd "$work"
-      composer config lock true
       composer update --no-interaction --no-progress --no-install -W --ignore-platform-reqs ) >&2
     OUTFILE="$OUT/${SLUG}.cdx.json"
     make_bom "$work" "$OUTFILE" "$VERSION"
