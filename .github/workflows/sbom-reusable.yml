@@ -41,6 +41,8 @@ on:
       DTRACK_API_KEY:  { required: true }
       DTRACK_API_URL:  { required: false }
       COMPOSER_AUTH:   { required: false }
+      # Only needed when a composer VCS repository points at a PRIVATE GitHub repository.
+      GH_COMPOSER_TOKEN: { required: false }
 
 permissions:
   contents: read          # default GITHUB_TOKEN is read-write in both orgs; narrow it explicitly.
@@ -108,6 +110,31 @@ jobs:
           repository: ${{ github.repository_owner }}/.github
           path: .sbom-tools
           ref: ${{ inputs.sbom_tools_ref }}
+
+      - name: "Rewrite SSH remotes to HTTPS"
+        # Composer VCS repositories are frequently declared with an SSH URL
+        # ("url": "git@github.com:org/pkg.git"). A GitHub-hosted runner has no SSH key, so composer
+        # fails with:
+        #     Failed to execute git clone --mirror -- git@github.com:org/pkg.git
+        # Seventeen repositories in this estate declare such entries, so this is the normal case,
+        # not an outlier. Rewrite to HTTPS for the duration of the job.
+        #
+        # GITHUB_TOKEN is scoped to the calling repository only, so it does not unlock OTHER private
+        # repositories; supply GH_COMPOSER_TOKEN (a PAT or App token with read access to them) when
+        # a private cross-repository dependency has to resolve. Public dependencies need no token.
+        env:
+          GH_COMPOSER_TOKEN: ${{ secrets.GH_COMPOSER_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${GH_COMPOSER_TOKEN:-}" ]; then
+            git config --global url."https://x-access-token:${GH_COMPOSER_TOKEN}@github.com/".insteadOf "git@github.com:"
+            git config --global url."https://x-access-token:${GH_COMPOSER_TOKEN}@github.com/".insteadOf "ssh://git@github.com/"
+            echo "SSH remotes rewritten to HTTPS with a supplied token"
+          else
+            git config --global url."https://github.com/".insteadOf "git@github.com:"
+            git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+            echo "SSH remotes rewritten to anonymous HTTPS (public dependencies only)"
+          fi
 
       - name: "Generate SBOM"
         id: gen
