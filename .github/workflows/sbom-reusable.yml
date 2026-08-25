@@ -42,7 +42,8 @@ on:
       DTRACK_API_URL:  { required: false }
       COMPOSER_AUTH:   { required: false }
       # Only needed when a composer VCS repository points at a PRIVATE GitHub repository.
-      GH_COMPOSER_TOKEN: { required: false }
+      # Named to match the secret this organisation already uses for that purpose.
+      COMPOSER_GITHUB_TOKEN: { required: false }
 
 permissions:
   contents: read          # default GITHUB_TOKEN is read-write in both orgs; narrow it explicitly.
@@ -123,17 +124,25 @@ jobs:
         # repositories; supply GH_COMPOSER_TOKEN (a PAT or App token with read access to them) when
         # a private cross-repository dependency has to resolve. Public dependencies need no token.
         env:
-          GH_COMPOSER_TOKEN: ${{ secrets.GH_COMPOSER_TOKEN }}
+          COMPOSER_GITHUB_TOKEN: ${{ secrets.COMPOSER_GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          if [ -n "${GH_COMPOSER_TOKEN:-}" ]; then
-            git config --global url."https://x-access-token:${GH_COMPOSER_TOKEN}@github.com/".insteadOf "git@github.com:"
-            git config --global url."https://x-access-token:${GH_COMPOSER_TOKEN}@github.com/".insteadOf "ssh://git@github.com/"
-            echo "SSH remotes rewritten to HTTPS with a supplied token"
+          if [ -n "${COMPOSER_GITHUB_TOKEN:-}" ]; then
+            git config --global url."https://x-access-token:${COMPOSER_GITHUB_TOKEN}@github.com/".insteadOf "git@github.com:"
+            git config --global url."https://x-access-token:${COMPOSER_GITHUB_TOKEN}@github.com/".insteadOf "ssh://git@github.com/"
+            # With a github-oauth token composer prefers the GitHub API over cloning, which is both
+            # faster and avoids git transport entirely for github.com VCS repositories.
+            printf '%s' "{\"github-oauth\":{\"github.com\":\"${COMPOSER_GITHUB_TOKEN}\"}}" \
+              > "$RUNNER_TEMP/composer-auth.json"
+            echo "COMPOSER_AUTH=$(cat "$RUNNER_TEMP/composer-auth.json")" >> "$GITHUB_ENV"
+            rm -f "$RUNNER_TEMP/composer-auth.json"
+            echo "SSH remotes rewritten to HTTPS; composer authenticated against the GitHub API"
           else
             git config --global url."https://github.com/".insteadOf "git@github.com:"
             git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
-            echo "SSH remotes rewritten to anonymous HTTPS (public dependencies only)"
+            echo "SSH remotes rewritten to anonymous HTTPS (public dependencies only)."
+            echo "A PRIVATE cross-repository dependency will still fail: GITHUB_TOKEN is scoped to"
+            echo "this repository only. Supply COMPOSER_GITHUB_TOKEN for those."
           fi
 
       - name: "Generate SBOM"
