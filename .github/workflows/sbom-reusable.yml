@@ -125,8 +125,13 @@ jobs:
         # a private cross-repository dependency has to resolve. Public dependencies need no token.
         env:
           COMPOSER_GITHUB_TOKEN: ${{ secrets.COMPOSER_GITHUB_TOKEN }}
+          SUPPLIED_COMPOSER_AUTH: ${{ secrets.COMPOSER_AUTH }}
         run: |
           set -euo pipefail
+          if [ -n "${SUPPLIED_COMPOSER_AUTH:-}" ]; then
+            echo "COMPOSER_AUTH=${SUPPLIED_COMPOSER_AUTH}" >> "$GITHUB_ENV"
+            echo "Using the supplied COMPOSER_AUTH"
+          fi
           if [ -n "${COMPOSER_GITHUB_TOKEN:-}" ]; then
             git config --global url."https://x-access-token:${COMPOSER_GITHUB_TOKEN}@github.com/".insteadOf "git@github.com:"
             git config --global url."https://x-access-token:${COMPOSER_GITHUB_TOKEN}@github.com/".insteadOf "ssh://git@github.com/"
@@ -148,10 +153,16 @@ jobs:
       - name: "Generate SBOM"
         id: gen
         env:
-          COMPOSER_AUTH: ${{ secrets.COMPOSER_AUTH }}
+          # COMPOSER_AUTH is deliberately NOT declared here. A step-level env: entry overrides
+          # anything written to $GITHUB_ENV by an earlier step, so declaring it with an unset
+          # secret would silently blank the value built in "Rewrite SSH remotes to HTTPS" - which
+          # is exactly how a private VCS dependency kept failing with a bare SSH permission error.
           COMPOSER_HOME: /tmp/composer-sbom
         run: |
           set -euo pipefail
+          # Prove the URL rewrite survived into this step; cheap, and the failure mode is silent.
+          git config --global --get-regexp '^url\.' || echo "no url.* rewrite configured"
+          [ -n "${COMPOSER_AUTH:-}" ] && echo "COMPOSER_AUTH is set" || echo "COMPOSER_AUTH is empty"
           TARGET_REF='${{ inputs.target_ref }}'
           chmod +x .sbom-tools/scripts/*.sh
           NAME='${{ inputs.project_name }}'
