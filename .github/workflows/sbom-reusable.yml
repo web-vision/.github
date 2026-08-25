@@ -112,7 +112,7 @@ jobs:
           path: .sbom-tools
           ref: ${{ inputs.sbom_tools_ref }}
 
-      - name: "Rewrite SSH remotes to HTTPS"
+      - name: "Configure composer credentials and remotes"
         # Composer VCS repositories are frequently declared with an SSH URL
         # ("url": "git@github.com:org/pkg.git"). A GitHub-hosted runner has no SSH key, so composer
         # fails with:
@@ -126,28 +126,54 @@ jobs:
         env:
           COMPOSER_GITHUB_TOKEN: ${{ secrets.COMPOSER_GITHUB_TOKEN }}
           SUPPLIED_COMPOSER_AUTH: ${{ secrets.COMPOSER_AUTH }}
+          COMPOSER_HOME: /tmp/composer-sbom
         run: |
           set -euo pipefail
+          mkdir -p "$COMPOSER_HOME"
+
+          # Credentials go into $COMPOSER_HOME/auth.json rather than the COMPOSER_AUTH environment
+          # variable. COMPOSER_AUTH commonly holds a complete, MULTI-LINE auth.json document, and a
+          # multi-line value cannot be written to $GITHUB_ENV as KEY=value - it fails the step with
+          # "Unable to process file command 'env' successfully. Invalid format". Writing the file
+          # sidesteps that entirely and matches how the other workflows here already do it.
           if [ -n "${SUPPLIED_COMPOSER_AUTH:-}" ]; then
-            echo "COMPOSER_AUTH=${SUPPLIED_COMPOSER_AUTH}" >> "$GITHUB_ENV"
-            echo "Using the supplied COMPOSER_AUTH"
+            printf '%s' "$SUPPLIED_COMPOSER_AUTH" > "$COMPOSER_HOME/auth.json"
+            AUTH_SOURCE="COMPOSER_AUTH secret"
+          elif [ -n "${COMPOSER_GITHUB_TOKEN:-}" ]; then
+            printf '{"github-oauth":{"github.com":"%s"}}' "$COMPOSER_GITHUB_TOKEN" \
+              > "$COMPOSER_HOME/auth.json"
+            AUTH_SOURCE="COMPOSER_GITHUB_TOKEN"
+          else
+            AUTH_SOURCE=""
           fi
+          if [ -n "$AUTH_SOURCE" ]; then
+            # Validate without printing: a malformed auth.json makes composer fail obscurely later.
+            if jq -e . "$COMPOSER_HOME/auth.json" >/dev/null 2>&1; then
+              chmod 600 "$COMPOSER_HOME/auth.json"
+              echo "composer credentials written from $AUTH_SOURCE"
+            else
+              rm -f "$COMPOSER_HOME/auth.json"
+              echo "::error::The credential supplied via $AUTH_SOURCE is not valid JSON."
+              echo "::error::COMPOSER_AUTH must contain a complete auth.json document, e.g."
+              echo "::error::  {\"http-basic\":{\"repo.example.com\":{\"username\":\"..\",\"password\":\"..\"}}}"
+              exit 1
+            fi
+          else
+            echo "no composer credentials supplied"
+          fi
+
+          # Composer VCS repositories are frequently declared with an SSH URL
+          # ("url": "git@github.com:org/pkg.git"). A GitHub-hosted runner has no SSH key, so
+          # composer dies with: Failed to execute git clone --mirror -- git@github.com:org/pkg.git
+          # Seventeen repositories in this estate declare such entries.
           if [ -n "${COMPOSER_GITHUB_TOKEN:-}" ]; then
             git config --global url."https://x-access-token:${COMPOSER_GITHUB_TOKEN}@github.com/".insteadOf "git@github.com:"
             git config --global url."https://x-access-token:${COMPOSER_GITHUB_TOKEN}@github.com/".insteadOf "ssh://git@github.com/"
-            # With a github-oauth token composer prefers the GitHub API over cloning, which is both
-            # faster and avoids git transport entirely for github.com VCS repositories.
-            printf '%s' "{\"github-oauth\":{\"github.com\":\"${COMPOSER_GITHUB_TOKEN}\"}}" \
-              > "$RUNNER_TEMP/composer-auth.json"
-            echo "COMPOSER_AUTH=$(cat "$RUNNER_TEMP/composer-auth.json")" >> "$GITHUB_ENV"
-            rm -f "$RUNNER_TEMP/composer-auth.json"
-            echo "SSH remotes rewritten to HTTPS; composer authenticated against the GitHub API"
+            echo "SSH remotes rewritten to authenticated HTTPS"
           else
             git config --global url."https://github.com/".insteadOf "git@github.com:"
             git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
-            echo "SSH remotes rewritten to anonymous HTTPS (public dependencies only)."
-            echo "A PRIVATE cross-repository dependency will still fail: GITHUB_TOKEN is scoped to"
-            echo "this repository only. Supply COMPOSER_GITHUB_TOKEN for those."
+            echo "SSH remotes rewritten to anonymous HTTPS (public dependencies only)"
           fi
 
       - name: "Generate SBOM"
@@ -161,8 +187,10 @@ jobs:
         run: |
           set -euo pipefail
           # Prove the URL rewrite survived into this step; cheap, and the failure mode is silent.
-          git config --global --get-regexp '^url\.' || echo "no url.* rewrite configured"
-          [ -n "${COMPOSER_AUTH:-}" ] && echo "COMPOSER_AUTH is set" || echo "COMPOSER_AUTH is empty"
+          git config --global --get-regexp '^url\.' >/dev/null 2>&1 \
+            && echo "url rewrite: active" || echo "url rewrite: NOT configured"
+          [ -s "$COMPOSER_HOME/auth.json" ] \
+            && echo "composer auth: present" || echo "composer auth: none"
           TARGET_REF='${{ inputs.target_ref }}'
           chmod +x .sbom-tools/scripts/*.sh
           NAME='${{ inputs.project_name }}'
